@@ -95,7 +95,7 @@ Open `http://localhost:10000`.
 
 ## Deploy online with Render
 
-The project is prepared for a single Render Docker Web Service, so the React UI and FastAPI endpoints share one public URL. Review status and checklist progress use a small SQLite state store (`GELDIUM_DB_PATH` can point it elsewhere). This is demo persistence only: Render's free filesystem is ephemeral, so state can be cleared by a restart or redeploy. Use an external managed database and authentication before storing operational or customer data.
+The project is prepared for a single Render Docker Web Service, so the React UI and FastAPI endpoints share one public URL. Review status and checklist progress use a small SQLite state store (`GELDIUM_DB_PATH` can point it elsewhere). If the UI reaches an older backend that does not have the workspace routes yet, it falls back to browser-saved progress and labels that mode in the review/checklist screens; restart or redeploy the updated backend to enable shared SQLite state. This is demo persistence only: Render's free filesystem is ephemeral, so state can be cleared by a restart or redeploy. Use an external managed database and authentication before storing operational or customer data.
 
 1. Create a GitHub repository and upload the **contents** of this folder. Keep `Dockerfile` and `render.yaml` at the repository root.
 2. In Render, choose **New → Blueprint** and connect that GitHub repository.

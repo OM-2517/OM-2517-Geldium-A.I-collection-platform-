@@ -14,6 +14,27 @@ import {
 } from 'recharts';
 
 const API = import.meta.env.VITE_API_BASE_URL || '';
+const WORKSPACE_CACHE_KEY = 'geldium.workspace-state.v1';
+
+function readWorkspaceCache() {
+  try { return JSON.parse(localStorage.getItem(WORKSPACE_CACHE_KEY) || '{}'); }
+  catch { return {}; }
+}
+
+function writeWorkspaceCache(patch) {
+  try { localStorage.setItem(WORKSPACE_CACHE_KEY, JSON.stringify({ ...readWorkspaceCache(), ...patch })); }
+  catch { /* Keep the workspace usable when browser storage is disabled or full. */ }
+}
+
+function summarizeWorkspace(reviewed = {}, checks = {}, eventCount = 0, store = 'browser') {
+  return {
+    reviewed_customers: Object.values(reviewed).filter(Boolean).length,
+    completed_validation_tasks: Object.values(checks).filter(Boolean).length,
+    validation_task_count: VALIDATION_ITEMS.length,
+    review_activity_events: eventCount,
+    state_store: store,
+  };
+}
 
 const NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard, group: 'Workspace' },
@@ -50,7 +71,11 @@ async function readApiResponse(response, fallback) {
     try { payload = JSON.parse(text); }
     catch { throw new Error(response.ok ? 'The server returned an unreadable response.' : fallback); }
   }
-  if (!response.ok) throw new Error(payload.detail || fallback);
+  if (!response.ok) {
+    const error = new Error(payload.detail || fallback);
+    error.status = response.status;
+    throw error;
+  }
   if (!text.trim()) throw new Error('The server returned an empty response. Please try again.');
   return payload;
 }
@@ -121,6 +146,7 @@ export default function App() {
   const [reviewed, setReviewed] = useState({});
   const [reviewActivity, setReviewActivity] = useState([]);
   const [operationSummary, setOperationSummary] = useState(null);
+  const [workspaceStore, setWorkspaceStore] = useState('checking');
   const [savingReviews, setSavingReviews] = useState({});
   const [savingChecks, setSavingChecks] = useState({});
   const [validationChecks, setValidationChecks] = useState({});
@@ -144,18 +170,31 @@ export default function App() {
   };
 
   const loadBackendState = async () => {
-    const [reviewsResponse, checklistResponse, summaryResponse] = await Promise.all([
-      fetch(`${API}/api/reviews`), fetch(`${API}/api/validation-checklist`), fetch(`${API}/api/operations/summary`),
+    const [reviewsResponse, checklistResponse] = await Promise.all([
+      fetch(`${API}/api/reviews`), fetch(`${API}/api/validation-checklist`),
     ]);
-    const [reviewsPayload, checklistPayload, summaryPayload] = await Promise.all([
+    if (reviewsResponse.status === 404 || checklistResponse.status === 404) {
+      const cached = readWorkspaceCache();
+      const cachedReviewed = cached.reviewed || {};
+      const cachedChecks = cached.validationChecks || {};
+      const cachedActivity = cached.reviewActivity || [];
+      setReviewed(cachedReviewed); setValidationChecks(cachedChecks); setReviewActivity(cachedActivity);
+      setOperationSummary(summarizeWorkspace(cachedReviewed, cachedChecks, cachedActivity.length));
+      setWorkspaceStore('browser');
+      return;
+    }
+    const [reviewsPayload, checklistPayload] = await Promise.all([
       readApiResponse(reviewsResponse, 'Could not load review queue state.'),
       readApiResponse(checklistResponse, 'Could not load validation progress.'),
-      readApiResponse(summaryResponse, 'Could not load operations summary.'),
     ]);
-    setReviewed(Object.fromEntries((reviewsPayload.items || []).filter((item) => item.reviewed).map((item) => [item.customer_id, true])));
+    const reviewedState = Object.fromEntries((reviewsPayload.items || []).filter((item) => item.reviewed).map((item) => [item.customer_id, true]));
     setReviewActivity(reviewsPayload.events || []);
-    setValidationChecks(Object.fromEntries((checklistPayload.items || []).filter((item) => item.completed).map((item) => [item.task_id, true])));
-    setOperationSummary(summaryPayload);
+    const checksState = Object.fromEntries((checklistPayload.items || []).filter((item) => item.completed).map((item) => [item.task_id, true]));
+    setReviewed(reviewedState); setValidationChecks(checksState); setWorkspaceStore('backend');
+    writeWorkspaceCache({ reviewed: reviewedState, reviewActivity: reviewsPayload.events || [], validationChecks: checksState });
+    const summaryResponse = await fetch(`${API}/api/operations/summary`);
+    const summaryPayload = summaryResponse.status === 404 ? null : await readApiResponse(summaryResponse, 'Could not load operations summary.');
+    setOperationSummary(summaryPayload || summarizeWorkspace(reviewedState, checksState, (reviewsPayload.events || []).length, 'sqlite'));
   };
 
   useEffect(() => { loadSample(); loadBackendState().catch((e) => setError(`Backend workspace state is unavailable: ${e.message}`)); }, []);
@@ -166,6 +205,15 @@ export default function App() {
     const next = !reviewed[customerId];
     setSavingReviews((prev) => ({ ...prev, [customerId]: true }));
     setReviewed((prev) => ({ ...prev, [customerId]: next }));
+    const saveInBrowser = () => {
+      const nextReviewed = { ...reviewed, [customerId]: next };
+      const event = { id: `browser-${Date.now()}`, customer_id: customerId, reviewed: next, created_at: new Date().toISOString() };
+      const nextActivity = [event, ...reviewActivity].slice(0, 12);
+      setReviewed(nextReviewed); setReviewActivity(nextActivity); setWorkspaceStore('browser');
+      setOperationSummary(summarizeWorkspace(nextReviewed, validationChecks, nextActivity.length));
+      writeWorkspaceCache({ reviewed: nextReviewed, reviewActivity: nextActivity });
+    };
+    if (workspaceStore === 'browser') { saveInBrowser(); setSavingReviews((prev) => ({ ...prev, [customerId]: false })); return; }
     try {
       const response = await fetch(`${API}/api/reviews/${encodeURIComponent(customerId)}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reviewed: next }),
@@ -173,6 +221,7 @@ export default function App() {
       await readApiResponse(response, 'Could not save the review status.');
       await loadBackendState();
     } catch (e) {
+      if (e.status === 404) { saveInBrowser(); setNotice('This backend version does not include workspace storage yet. Progress is saved in this browser.'); return; }
       setReviewed((prev) => {
         const restored = { ...prev };
         if (previous) restored[customerId] = true;
@@ -190,6 +239,13 @@ export default function App() {
     const previous = Boolean(validationChecks[taskId]);
     setSavingChecks((prev) => ({ ...prev, [taskId]: true }));
     setValidationChecks((prev) => ({ ...prev, [taskId]: completed }));
+    const saveInBrowser = () => {
+      const nextChecks = { ...validationChecks, [taskId]: completed };
+      setValidationChecks(nextChecks); setWorkspaceStore('browser');
+      setOperationSummary(summarizeWorkspace(reviewed, nextChecks, reviewActivity.length));
+      writeWorkspaceCache({ validationChecks: nextChecks });
+    };
+    if (workspaceStore === 'browser') { saveInBrowser(); setSavingChecks((prev) => ({ ...prev, [taskId]: false })); return; }
     try {
       const response = await fetch(`${API}/api/validation-checklist/${encodeURIComponent(taskId)}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ completed }),
@@ -197,6 +253,7 @@ export default function App() {
       await readApiResponse(response, 'Could not save checklist progress.');
       await loadBackendState();
     } catch (e) {
+      if (e.status === 404) { saveInBrowser(); setNotice('This backend version does not include workspace storage yet. Progress is saved in this browser.'); return; }
       setValidationChecks((prev) => ({ ...prev, [taskId]: previous }));
       setError(e.message);
     } finally {
@@ -205,17 +262,31 @@ export default function App() {
   };
 
   const resetValidationProgress = async () => {
+    if (workspaceStore === 'browser') {
+      setValidationChecks({}); writeWorkspaceCache({ validationChecks: {} });
+      setOperationSummary(summarizeWorkspace(reviewed, {}, reviewActivity.length));
+      setNotice('Validation progress was reset in this browser.'); return;
+    }
     try {
       const response = await fetch(`${API}/api/validation-checklist`, { method: 'DELETE' });
       await readApiResponse(response, 'Could not reset validation progress.');
       setValidationChecks({});
       await loadBackendState();
       setNotice('Validation checklist progress was reset on the backend.');
-    } catch (e) { setError(e.message); }
+    } catch (e) {
+      if (e.status === 404) { setWorkspaceStore('browser'); setValidationChecks({}); writeWorkspaceCache({ validationChecks: {} }); setNotice('Validation progress was reset in this browser.'); }
+      else setError(e.message);
+    }
   };
 
   const resetDemoProgress = async () => {
     setProfileOpen(false);
+    if (workspaceStore === 'browser') {
+      setReviewed({}); setValidationChecks({}); setReviewActivity([]); setSimulation(null);
+      setOperationSummary(summarizeWorkspace({}, {}, 0));
+      writeWorkspaceCache({ reviewed: {}, validationChecks: {}, reviewActivity: [] });
+      setNotice('Demo review and validation progress reset in this browser.'); return;
+    }
     try {
       const [reviewResponse, checklistResponse] = await Promise.all([
         fetch(`${API}/api/reviews`, { method: 'DELETE' }),
@@ -228,7 +299,14 @@ export default function App() {
       setReviewed({}); setValidationChecks({}); setSimulation(null);
       await loadBackendState();
       setNotice('Demo review and validation progress reset on the backend.');
-    } catch (e) { setError(e.message); }
+    } catch (e) {
+      if (e.status === 404) {
+        setWorkspaceStore('browser'); setReviewed({}); setValidationChecks({}); setReviewActivity([]); setSimulation(null);
+        setOperationSummary(summarizeWorkspace({}, {}, 0));
+        writeWorkspaceCache({ reviewed: {}, validationChecks: {}, reviewActivity: [] });
+        setNotice('Demo review and validation progress reset in this browser.');
+      } else setError(e.message);
+    }
   };
 
   const uploadCsv = async (file) => {
@@ -319,7 +397,7 @@ export default function App() {
       </nav>
       <div className="sidebar-bottom">
         <button className="sidebar-help" onClick={() => setWalkthroughOpen(true)}><div className="help-icon"><LifeBuoy size={17}/></div><div><strong>Need a walkthrough?</strong><span>Explore the prototype guide</span></div><ArrowRight size={15}/></button>
-        <div className="profile-menu-wrap"><button className="profile-row" aria-expanded={profileOpen} onClick={() => setProfileOpen((value) => !value)}><div className="profile-avatar">OG</div><div className="profile-copy"><strong>Project Presenter</strong><span>Student workspace</span></div><MoreHorizontal size={18}/></button>{profileOpen && <div className="popover-menu profile-menu"><strong>Demo controls</strong><button onClick={() => {setProfileOpen(false); setWalkthroughOpen(true)}}><CircleHelp size={14}/> Open walkthrough</button><button onClick={resetDemoProgress}><RefreshCw size={14}/> Reset demo progress</button><small>Progress is stored by this demo service. Free hosting may clear it after a restart.</small></div>}</div>
+        <div className="profile-menu-wrap"><button className="profile-row" aria-expanded={profileOpen} onClick={() => setProfileOpen((value) => !value)}><div className="profile-avatar">OG</div><div className="profile-copy"><strong>Project Presenter</strong><span>Student workspace</span></div><MoreHorizontal size={18}/></button>{profileOpen && <div className="popover-menu profile-menu"><strong>Demo controls</strong><button onClick={() => {setProfileOpen(false); setWalkthroughOpen(true)}}><CircleHelp size={14}/> Open walkthrough</button><button onClick={resetDemoProgress}><RefreshCw size={14}/> Reset demo progress</button><small>{workspaceStore === 'browser' ? 'The active API is missing workspace routes. Progress is saved in this browser until the updated backend is started.' : 'Progress is stored by this demo service. Free hosting may clear it after a restart.'}</small></div>}</div>
       </div>
     </aside>
 
@@ -340,11 +418,11 @@ export default function App() {
         {active === 'overview' && <OverviewPage summary={summary} quality={quality} segments={segments} paymentTrend={paymentTrend} issues={quality.issues || []} pie={delinquencyPie} loading={loading} go={setActive} />}
         {active === 'customers' && <CustomersPage records={filteredCustomers} count={records.length} query={query} setQuery={setQuery} segmentFilter={segmentFilter} setSegmentFilter={setSegmentFilter} onSelect={setSelectedCustomer} exportCustomers={exportCustomers} />}
         {active === 'simulator' && <SimulatorPage inputs={simInputs} setInputs={setSimInputs} result={simulation} run={runSimulation} loading={simLoading} />}
-        {active === 'review' && <ReviewPage queue={queue} reviewed={reviewed} onReview={toggleReviewStatus} saving={savingReviews} activity={reviewActivity} summary={operationSummary} onSelect={setSelectedCustomer} />}
+        {active === 'review' && <ReviewPage queue={queue} reviewed={reviewed} onReview={toggleReviewStatus} saving={savingReviews} activity={reviewActivity} summary={operationSummary} storageMode={workspaceStore} onSelect={setSelectedCustomer} />}
         {active === 'workflow' && <WorkflowPage selectedStage={workflowStage} setSelectedStage={setWorkflowStage} go={setActive} />}
         {active === 'responsible' && <ResponsiblePage quality={quality} segments={segments} summary={summary} go={setActive} />}
         {active === 'performance' && <PerformancePage summary={summary} go={setActive} />}
-        {active === 'validation' && <ValidationPage quality={quality} checks={validationChecks} saving={savingChecks} onToggle={setValidationCheck} onReset={resetValidationProgress} />}
+        {active === 'validation' && <ValidationPage quality={quality} checks={validationChecks} saving={savingChecks} storageMode={workspaceStore} onToggle={setValidationCheck} onReset={resetValidationProgress} />}
         <footer className="app-footer"><span>Geldium Collections Intelligence <b>v1.0</b></span><span><LockKeyhole size={12}/> Demo data · No real customer actions</span></footer>
       </div>
     </main>
@@ -435,16 +513,16 @@ function SimulatorPage({ inputs, setInputs, result, run, loading }) {
   </>;
 }
 
-function ReviewPage({ queue, reviewed, saving, activity, summary, onReview, onSelect }) {
+function ReviewPage({ queue, reviewed, saving, activity, summary, storageMode, onReview, onSelect }) {
   const openCount = queue.filter((row) => !reviewed[row.Customer_ID]).length;
   return <>
     <SectionHeader eyebrow="HUMAN-IN-THE-LOOP" title="Human review queue" description="A mock review worklist for cases surfaced by illustrative screening rules. No real outreach or financial action is performed." right={<Pill tone="warning">{openCount} awaiting review</Pill>} />
-    <div className="review-summary-grid"><div className="review-stat"><span>Queue size</span><strong>{queue.length}</strong><small>Rule-screened sample records</small></div><div className="review-stat"><span>Awaiting review</span><strong>{openCount}</strong><small>Waiting for a demo review</small></div><div className="review-stat"><span>Marked reviewed</span><strong>{summary?.reviewed_customers ?? Object.values(reviewed).filter(Boolean).length}</strong><small>Saved by the backend service</small></div></div>
+    <div className="review-summary-grid"><div className="review-stat"><span>Queue size</span><strong>{queue.length}</strong><small>Rule-screened sample records</small></div><div className="review-stat"><span>Awaiting review</span><strong>{openCount}</strong><small>Waiting for a demo review</small></div><div className="review-stat"><span>Marked reviewed</span><strong>{summary?.reviewed_customers ?? Object.values(reviewed).filter(Boolean).length}</strong><small>{storageMode === 'browser' ? 'Saved in this browser' : 'Saved by the backend service'}</small></div></div>
     <Panel title="Cases requiring human attention" subtitle="Sorted by illustrative rule points. This list is not a validated prediction or collections priority list.">
       <div className="table-scroll"><table><thead><tr><th>Customer ID</th><th>Rule band</th><th>Rule points</th><th>Recorded outcome</th><th>Suggested handling</th><th>Status</th><th>Action</th></tr></thead><tbody>
         {queue.map((row) => <tr key={row.Customer_ID}><td><button className="customer-link" onClick={() => onSelect(row)}>{row.Customer_ID}</button></td><td><Pill tone={row.screening.tone === 'high' ? 'danger' : 'warning'}>{row.screening.band}</Pill></td><td>{row.screening.points}</td><td>{labelStatus(row.Delinquent_Account)}</td><td>{row.screening.tone === 'high' ? 'Human review first' : 'Supportive outreach review'}</td><td>{reviewed[row.Customer_ID] ? <Pill tone="success">Reviewed</Pill> : <Pill tone="neutral">Awaiting</Pill>}</td><td><button disabled={saving[row.Customer_ID]} className={reviewed[row.Customer_ID] ? 'reviewed-button' : 'small-action'} onClick={() => onReview(row.Customer_ID)}>{saving[row.Customer_ID] ? 'Saving…' : reviewed[row.Customer_ID] ? <><Check size={14}/> Undo</> : <><CheckCircle2 size={14}/> Mark reviewed</>}</button></td></tr>)}
       </tbody></table>{!queue.length && <EmptyState title="No cases in the demo queue" description="No records met the illustrative medium or high screening rules."/>}</div>
-      <div className="table-foot">Review updates are saved through the API to the demo SQLite store and recorded in a recent activity history. The worklist does not contact customers, modify accounts or perform a financial action.</div>
+      <div className="table-foot">{storageMode === 'browser' ? 'The active API does not expose workspace routes, so review changes are saved in this browser. Restart the updated backend for shared SQLite storage. ' : 'Review updates are saved through the API to the demo SQLite store and recorded in a recent activity history. '}The worklist does not contact customers, modify accounts or perform a financial action.</div>
     </Panel>
     <Panel className="review-activity-panel" title="Recent review activity" subtitle="Latest status changes saved by the backend service.">
       {activity.length ? <div className="review-activity-list">{activity.map((event) => <div className="review-activity-row" key={event.id || `${event.customer_id}-${event.created_at}`}><span className={`activity-dot ${event.reviewed ? 'done' : ''}`}/><div><strong>{event.customer_id}</strong><small>{event.reviewed ? 'Marked reviewed' : 'Returned to awaiting review'}</small></div><time dateTime={event.created_at}>{new Date(event.created_at).toLocaleString()}</time></div>)}</div> : <EmptyState icon={Activity} title="No review actions yet" description="Saved review decisions will appear here."/>}
@@ -493,7 +571,7 @@ function ResponsiblePage({ quality, segments, summary, go }) {
   </>;
 }
 
-function ValidationPage({ quality, checks, saving, onToggle, onReset }) {
+function ValidationPage({ quality, checks, saving, storageMode, onToggle, onReset }) {
   const done = VALIDATION_ITEMS.filter((item) => checks[item.id]).length;
   const grouped = [...new Set(VALIDATION_ITEMS.map((item) => item.area))];
   const exportChecklist = () => {
@@ -506,7 +584,7 @@ function ValidationPage({ quality, checks, saving, onToggle, onReset }) {
   return <>
     <SectionHeader eyebrow="READINESS WORKSPACE" title="Pre-deployment validation checklist" description="Work through the data, model, fairness, privacy and pilot controls that need evidence before a real-world pilot." right={<button className="secondary-button" onClick={exportChecklist}><Download size={15}/> Export checklist</button>} />
     <div className="validation-banner"><div className="validation-banner-icon"><ShieldAlert size={20}/></div><div><strong>This checklist tracks work; it does not validate the system.</strong><p>No predictive model is trained in this prototype. Mark an item only after its evidence has been reviewed and approved by the responsible owner.</p></div></div>
-    <div className="validation-progress panel"><div><span className="eyebrow">BACKEND-SAVED PROGRESS</span><strong>{done} of {VALIDATION_ITEMS.length}</strong><small>Saved by this service for the demo. Completion is not platform approval.</small></div><div className="validation-progress-track"><span style={{width:`${Math.round((done / VALIDATION_ITEMS.length) * 100)}%`}}/></div><button className="text-button" disabled={!done} onClick={onReset}>Reset progress</button></div>
+    <div className="validation-progress panel"><div><span className="eyebrow">{storageMode === 'browser' ? 'BROWSER-SAVED PROGRESS' : 'BACKEND-SAVED PROGRESS'}</span><strong>{done} of {VALIDATION_ITEMS.length}</strong><small>{storageMode === 'browser' ? 'Saved in this browser while the active backend is updated. ' : 'Saved by this service for the demo. '}Completion is not platform approval.</small></div><div className="validation-progress-track"><span style={{width:`${Math.round((done / VALIDATION_ITEMS.length) * 100)}%`}}/></div><button className="text-button" disabled={!done} onClick={onReset}>Reset progress</button></div>
     <div className="validation-stats"><div><span>Payment history flags</span><strong>{num(quality.payment_history_mismatches)}</strong><small>Need source reconciliation</small></div><div><span>Utilization over 100%</span><strong>{num(quality.utilization_above_100)}</strong><small>Confirm units and bounds</small></div><div><span>Checklist items</span><strong>{VALIDATION_ITEMS.length}</strong><small>Grouped by readiness area</small></div></div>
     <div className="validation-sections">{grouped.map((area) => <Panel key={area} title={area} subtitle="Assign an owner, collect evidence and record approval outside this demonstration." className="validation-section"><div className="validation-items">{VALIDATION_ITEMS.filter((item) => item.area === area).map((item) => <label className={`validation-item ${checks[item.id] ? 'complete' : ''}`} key={item.id}><input type="checkbox" checked={Boolean(checks[item.id])} disabled={saving[item.id]} onChange={(event) => onToggle(item.id, event.target.checked)}/><span className="validation-check-icon">{checks[item.id] ? <Check size={15}/> : <span/>}</span><span className="validation-item-copy"><strong>{item.title}</strong><small>{item.detail}</small></span><Pill tone={checks[item.id] ? 'success' : 'warning'}>{saving[item.id] ? 'Saving…' : checks[item.id] ? 'Marked done' : 'Evidence needed'}</Pill></label>)}</div></Panel>)}</div>
     <div className="notice-inline"><Info size={16}/> Checklist progress is stored by the backend service. It is not an audit record, approval or evidence that a model, fairness control, security measure or deployment has passed review. The free-hosting demo may lose data when its service restarts.</div>
