@@ -36,6 +36,26 @@ function summarizeWorkspace(reviewed = {}, checks = {}, eventCount = 0, store = 
   };
 }
 
+function buildClientPreflight(data) {
+  const records = data?.records || [];
+  const fields = Object.keys(records[0] || {});
+  const required = ['Customer_ID', 'Delinquent_Account', 'Missed_Payments', 'Credit_Utilization', 'Debt_to_Income_Ratio', 'Credit_Score', 'Month_1', 'Month_2', 'Month_3', 'Month_4', 'Month_5', 'Month_6'];
+  const missing = required.filter((field) => !fields.includes(field));
+  const qualityIssues = data?.quality?.issues || [];
+  const checks = [
+    { id: 'api-service', title: 'Analytics API', status: 'passed', detail: 'Sample analysis loaded successfully from the active API.' },
+    { id: 'sample-dataset', title: 'Loaded dataset schema', status: records.length && !missing.length ? 'passed' : 'blocked', detail: !records.length ? 'No analysed records are available.' : missing.length ? `Missing expected fields: ${missing.join(', ')}.` : `${records.length.toLocaleString()} rows loaded with all ${required.length} expected fields.` },
+    { id: 'data-quality', title: 'Dataset quality', status: qualityIssues.length ? 'review' : 'passed', detail: qualityIssues.length ? `${qualityIssues.length} observed quality issue types need data-owner review.` : 'No configured data-quality warnings were found.' },
+    { id: 'workspace-api', title: 'Workspace API version', status: 'review', detail: 'The active backend does not expose the readiness-scan route. This report is based on checks available in the browser.' },
+    { id: 'model-validation', title: 'Model and fairness validation', status: 'review', detail: 'No trained model, holdout evaluation, calibration or subgroup fairness results are available in this demo.' },
+    { id: 'privacy-controls', title: 'Access and privacy controls', status: 'review', detail: 'The public demo has no authentication or role-based access control. Use sample data only.' },
+    { id: 'human-oversight', title: 'Human oversight boundary', status: 'passed', detail: 'The interface does not contact customers or perform account actions.' },
+  ];
+  const summary = { passed: checks.filter((item) => item.status === 'passed').length, review: checks.filter((item) => item.status === 'review').length, blocked: checks.filter((item) => item.status === 'blocked').length, total: checks.length };
+  const overallStatus = summary.blocked ? 'blocked' : 'review_required';
+  return { checked_at: new Date().toISOString(), overall_status: overallStatus, overall_label: overallStatus === 'blocked' ? 'Fix required' : 'Human review required', summary, checks, scope_note: 'Browser fallback checks the loaded demo data only. It cannot confirm backend storage, deployment security or approval for real customer decisions.' };
+}
+
 const NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard, group: 'Workspace' },
   { id: 'customers', label: 'Customer explorer', icon: Users, group: 'Workspace' },
@@ -149,6 +169,8 @@ export default function App() {
   const [workspaceStore, setWorkspaceStore] = useState('checking');
   const [savingReviews, setSavingReviews] = useState({});
   const [savingChecks, setSavingChecks] = useState({});
+  const [preflight, setPreflight] = useState(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
   const [validationChecks, setValidationChecks] = useState({});
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
@@ -164,6 +186,7 @@ export default function App() {
       const payload = await readApiResponse(response, 'Unable to load the sample dataset.');
       setData(payload);
       setNotice('Loaded the supplied 500-record Geldium sample dataset.');
+      await runPreflight(payload);
     } catch (e) {
       setError('The analytics API is not available. Start the backend or use the deployed application.');
     } finally { setLoading(false); }
@@ -195,6 +218,21 @@ export default function App() {
     const summaryResponse = await fetch(`${API}/api/operations/summary`);
     const summaryPayload = summaryResponse.status === 404 ? null : await readApiResponse(summaryResponse, 'Could not load operations summary.');
     setOperationSummary(summaryPayload || summarizeWorkspace(reviewedState, checksState, (reviewsPayload.events || []).length, 'sqlite'));
+  };
+
+  const runPreflight = async (analysisData = data) => {
+    if (preflightLoading) return;
+    setPreflightLoading(true);
+    try {
+      const response = await fetch(`${API}/api/preflight`);
+      if (response.status === 404) {
+        setPreflight(buildClientPreflight(analysisData));
+        return;
+      }
+      const payload = await readApiResponse(response, 'The readiness scan could not complete.');
+      setPreflight(payload);
+    } catch (e) { setError(`Readiness scan could not complete: ${e.message}`); }
+    finally { setPreflightLoading(false); }
   };
 
   useEffect(() => { loadSample(); loadBackendState().catch((e) => setError(`Backend workspace state is unavailable: ${e.message}`)); }, []);
@@ -420,9 +458,9 @@ export default function App() {
         {active === 'simulator' && <SimulatorPage inputs={simInputs} setInputs={setSimInputs} result={simulation} run={runSimulation} loading={simLoading} />}
         {active === 'review' && <ReviewPage queue={queue} reviewed={reviewed} onReview={toggleReviewStatus} saving={savingReviews} activity={reviewActivity} summary={operationSummary} storageMode={workspaceStore} onSelect={setSelectedCustomer} />}
         {active === 'workflow' && <WorkflowPage selectedStage={workflowStage} setSelectedStage={setWorkflowStage} go={setActive} />}
-        {active === 'responsible' && <ResponsiblePage quality={quality} segments={segments} summary={summary} go={setActive} />}
+        {active === 'responsible' && <ResponsiblePage quality={quality} segments={segments} summary={summary} preflight={preflight} preflightLoading={preflightLoading} onScan={runPreflight} go={setActive} />}
         {active === 'performance' && <PerformancePage summary={summary} go={setActive} />}
-        {active === 'validation' && <ValidationPage quality={quality} checks={validationChecks} saving={savingChecks} storageMode={workspaceStore} onToggle={setValidationCheck} onReset={resetValidationProgress} />}
+        {active === 'validation' && <ValidationPage quality={quality} checks={validationChecks} saving={savingChecks} storageMode={workspaceStore} preflight={preflight} preflightLoading={preflightLoading} onScan={runPreflight} onToggle={setValidationCheck} onReset={resetValidationProgress} />}
         <footer className="app-footer"><span>Geldium Collections Intelligence <b>v1.0</b></span><span><LockKeyhole size={12}/> Demo data · No real customer actions</span></footer>
       </div>
     </main>
@@ -547,7 +585,21 @@ function WorkflowPage({ selectedStage, setSelectedStage, go }) {
   </>;
 }
 
-function ResponsiblePage({ quality, segments, summary, go }) {
+function PreflightReport({ report }) {
+  if (!report) return null;
+  const badgeTone = report.overall_status === 'blocked' ? 'danger' : report.overall_status === 'review_required' ? 'warning' : 'success';
+  const counts = report.summary || {};
+  return <Panel className="preflight-report" title={`Automated scan · ${report.overall_label || 'Status available'}`} subtitle={`${counts.passed || 0} passed · ${counts.review || 0} need review · ${counts.blocked || 0} blocked${report.checked_at ? ` · ${new Date(report.checked_at).toLocaleString()}` : ''}`}>
+    <div className="preflight-grid">{(report.checks || []).map((check) => <div className={`preflight-check ${check.status}`} key={check.id}>
+      <span className="preflight-check-icon">{check.status === 'passed' ? <CheckCircle2 size={16}/> : check.status === 'blocked' ? <AlertCircle size={16}/> : <Clock3 size={16}/>}</span>
+      <div><strong>{check.title}</strong><small>{check.detail}</small></div>
+      <Pill tone={check.status === 'passed' ? 'success' : check.status === 'blocked' ? 'danger' : 'warning'}>{check.status === 'passed' ? 'Passed' : check.status === 'blocked' ? 'Blocked' : 'Review'}</Pill>
+    </div>)}</div>
+    <div className="preflight-scope"><Info size={14}/>{report.scope_note}</div>
+  </Panel>;
+}
+
+function ResponsiblePage({ quality, segments, summary, preflight, preflightLoading, onScan, go }) {
   const controls = [
     { icon: ScaleIcon, title:'Fairness & proxy control', text:'Check error rates, calibration and flag rates across relevant groups. Review age, location and employment fields for unjustified proxy effects; investigate disparities rather than assuming they prove bias.' },
     { icon: MessageSquareText, title:'Explainability & contestability', text:'Provide a concise reason summary for each review signal. Let staff and customers challenge or correct inaccurate information; keep a traceable record of overrides.' },
@@ -556,7 +608,8 @@ function ResponsiblePage({ quality, segments, summary, go }) {
   ];
   return <>
     <SectionHeader eyebrow="TRUST, SAFETY & CONTROL" title="Responsible AI guardrails" description="Controls must be designed into the workflow before any predictive model or automation is used with real customers." />
-    <div className="governance-status"><div className="governance-status-icon"><ShieldAlert size={22}/></div><div><strong>Pre-deployment validation required</strong><p>No trained model or fairness evaluation is available in this prototype. The safeguards below describe what must be tested and approved before a pilot.</p></div><Pill tone="warning">Not yet validated</Pill><button className="secondary-button validation-open" onClick={() => go('validation')}><FileCheck2 size={15}/> Open validation checklist <ArrowRight size={14}/></button></div>
+    <div className="governance-status"><div className="governance-status-icon"><ShieldAlert size={22}/></div><div><strong>{preflight?.overall_label || 'Readiness scan not available yet'}</strong><p>{preflight ? `${preflight.summary?.passed || 0} automated checks passed. Review the flagged model, fairness and privacy items before considering any real-world pilot.` : 'Run the automated platform scan to check the API, sample data, workspace store and remaining governance reviews.'}</p></div><Pill tone={preflight?.overall_status === 'blocked' ? 'danger' : preflight?.overall_status === 'demo_checks_passed' ? 'success' : 'warning'}>{preflight?.overall_status === 'blocked' ? 'Action required' : preflight?.overall_status === 'demo_checks_passed' ? 'Demo checks passed' : 'Human review required'}</Pill><button className="secondary-button" onClick={() => onScan()} disabled={preflightLoading}><RefreshCw size={15}/>{preflightLoading ? 'Scanning…' : 'Run platform scan'}</button><button className="secondary-button validation-open" onClick={() => go('validation')}><FileCheck2 size={15}/> Open evidence checklist <ArrowRight size={14}/></button></div>
+    <PreflightReport report={preflight}/>
     <div className="guardrail-grid">{controls.map((control, i)=><div className="guardrail-card" key={i}><div className="guardrail-icon"><control.icon size={20}/></div><div className="guardrail-number">0{i+1}</div><h3>{control.title}</h3><p>{control.text}</p><button className="text-button guardrail-action" onClick={() => go('validation')}>Explore control <ArrowRight size={13}/></button></div>)}</div>
     <div className="dashboard-grid two-col governance-lower">
       <Panel title="Dataset issues to resolve" subtitle="Observed from the supplied 500-record workbook.">
@@ -571,7 +624,7 @@ function ResponsiblePage({ quality, segments, summary, go }) {
   </>;
 }
 
-function ValidationPage({ quality, checks, saving, storageMode, onToggle, onReset }) {
+function ValidationPage({ quality, checks, saving, storageMode, preflight, preflightLoading, onScan, onToggle, onReset }) {
   const done = VALIDATION_ITEMS.filter((item) => checks[item.id]).length;
   const grouped = [...new Set(VALIDATION_ITEMS.map((item) => item.area))];
   const exportChecklist = () => {
@@ -583,7 +636,8 @@ function ValidationPage({ quality, checks, saving, storageMode, onToggle, onRese
   };
   return <>
     <SectionHeader eyebrow="READINESS WORKSPACE" title="Pre-deployment validation checklist" description="Work through the data, model, fairness, privacy and pilot controls that need evidence before a real-world pilot." right={<button className="secondary-button" onClick={exportChecklist}><Download size={15}/> Export checklist</button>} />
-    <div className="validation-banner"><div className="validation-banner-icon"><ShieldAlert size={20}/></div><div><strong>This checklist tracks work; it does not validate the system.</strong><p>No predictive model is trained in this prototype. Mark an item only after its evidence has been reviewed and approved by the responsible owner.</p></div></div>
+    <div className="validation-banner"><div className="validation-banner-icon"><ShieldAlert size={20}/></div><div><strong>Run automated checks and record human evidence</strong><p>The platform scan checks technical readiness. This checklist tracks evidence and approvals for data, model, fairness, privacy and pilot controls.</p></div><button className="secondary-button" onClick={() => onScan()} disabled={preflightLoading}><RefreshCw size={15}/>{preflightLoading ? 'Scanning…' : 'Run platform scan'}</button></div>
+    <PreflightReport report={preflight}/>
     <div className="validation-progress panel"><div><span className="eyebrow">{storageMode === 'browser' ? 'BROWSER-SAVED PROGRESS' : 'BACKEND-SAVED PROGRESS'}</span><strong>{done} of {VALIDATION_ITEMS.length}</strong><small>{storageMode === 'browser' ? 'Saved in this browser while the active backend is updated. ' : 'Saved by this service for the demo. '}Completion is not platform approval.</small></div><div className="validation-progress-track"><span style={{width:`${Math.round((done / VALIDATION_ITEMS.length) * 100)}%`}}/></div><button className="text-button" disabled={!done} onClick={onReset}>Reset progress</button></div>
     <div className="validation-stats"><div><span>Payment history flags</span><strong>{num(quality.payment_history_mismatches)}</strong><small>Need source reconciliation</small></div><div><span>Utilization over 100%</span><strong>{num(quality.utilization_above_100)}</strong><small>Confirm units and bounds</small></div><div><span>Checklist items</span><strong>{VALIDATION_ITEMS.length}</strong><small>Grouped by readiness area</small></div></div>
     <div className="validation-sections">{grouped.map((area) => <Panel key={area} title={area} subtitle="Assign an owner, collect evidence and record approval outside this demonstration." className="validation-section"><div className="validation-items">{VALIDATION_ITEMS.filter((item) => item.area === area).map((item) => <label className={`validation-item ${checks[item.id] ? 'complete' : ''}`} key={item.id}><input type="checkbox" checked={Boolean(checks[item.id])} disabled={saving[item.id]} onChange={(event) => onToggle(item.id, event.target.checked)}/><span className="validation-check-icon">{checks[item.id] ? <Check size={15}/> : <span/>}</span><span className="validation-item-copy"><strong>{item.title}</strong><small>{item.detail}</small></span><Pill tone={checks[item.id] ? 'success' : 'warning'}>{saving[item.id] ? 'Saving…' : checks[item.id] ? 'Marked done' : 'Evidence needed'}</Pill></label>)}</div></Panel>)}</div>

@@ -13,6 +13,7 @@ A React + FastAPI decision-support prototype built to demonstrate the four deliv
 - Human-review queue with backend-saved review status and a recent activity trail in SQLite; it does not perform a financial action.
 - Four-stage workflow view: data intake → assessment → support routing → learning and monitoring.
 - Interactive pre-deployment checklist covering data readiness, model evaluation, fairness, privacy and pilot controls. Progress is stored by the backend in SQLite.
+- Automated readiness scan for API availability, sample-data schema and quality warnings, SQLite access, and governance gaps; results are explicitly scoped to this demo.
 - Responsible AI page covering fairness, explainability, privacy, compliance review and observed dataset-quality issues.
 - Performance scorecard covering business and customer KPIs for a future controlled pilot.
 - Responsive layout for desktop and tablet/mobile demonstrations.
@@ -125,6 +126,7 @@ python -m backend.smoke_test
 - `PUT /api/validation-checklist/{task_id}` — save a checklist state (`{"completed": true}`).
 - `DELETE /api/validation-checklist` — clear checklist progress.
 - `GET /api/operations/summary` — backend counters for reviewed customers, checklist progress and review activity.
+- `GET /api/preflight` — run technical checks and report model, fairness and privacy items that still need human review.
 
 Interactive API documentation is available at `/docs` when the API is running.
 

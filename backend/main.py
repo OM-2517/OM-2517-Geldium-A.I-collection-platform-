@@ -64,6 +64,11 @@ VALIDATION_TASK_IDS = [
     "data-definitions", "reconcile-payments", "missingness", "utilization", "labels", "identity",
     "baseline", "holdout", "calibration", "fairness", "explainability", "privacy", "pilot", "monitoring",
 ]
+PREFLIGHT_REQUIRED_COLUMNS = {
+    "Customer_ID", "Delinquent_Account", "Missed_Payments", "Credit_Utilization",
+    "Debt_to_Income_Ratio", "Credit_Score", "Month_1", "Month_2", "Month_3",
+    "Month_4", "Month_5", "Month_6",
+}
 
 
 def _safe_number(value: Any) -> float | None:
@@ -365,6 +370,86 @@ def get_validation_state() -> dict[str, Any]:
 def operations_summary() -> dict[str, Any]:
     """Return service-backed workflow counters for the demo workspace."""
     return storage.operations_summary(len(VALIDATION_TASK_IDS))
+
+
+@app.get("/api/preflight")
+def preflight_scan() -> dict[str, Any]:
+    """Run real technical checks and report governance items that still need review."""
+    from datetime import datetime, timezone
+
+    checks: list[dict[str, str]] = [
+        {
+            "id": "api-service", "title": "Analytics API", "status": "passed",
+            "detail": "The request reached this API and the readiness scan is running.",
+        }
+    ]
+
+    if not DATA_PATH.exists():
+        checks.append({
+            "id": "sample-dataset", "title": "Bundled sample data", "status": "blocked",
+            "detail": "The sample CSV is missing from the backend data folder.",
+        })
+    else:
+        try:
+            frame = pd.read_csv(DATA_PATH)
+            missing = sorted(PREFLIGHT_REQUIRED_COLUMNS - set(frame.columns))
+            if frame.empty or missing:
+                detail = "The sample CSV has no rows." if frame.empty else f"Missing expected fields: {', '.join(missing)}."
+                checks.append({"id": "sample-dataset", "title": "Bundled sample data", "status": "blocked", "detail": detail})
+            else:
+                checks.append({
+                    "id": "sample-dataset", "title": "Bundled sample data", "status": "passed",
+                    "detail": f"{len(frame):,} rows loaded; all {len(PREFLIGHT_REQUIRED_COLUMNS)} required fields are present.",
+                })
+                quality = analyse_frame(frame)["quality"]
+                issue_count = len(quality.get("issues", []))
+                mismatch_count = int(quality.get("payment_history_mismatches", 0))
+                quality_status = "review" if issue_count else "passed"
+                quality_detail = (
+                    f"{issue_count} data-quality issue types need owner review, including {mismatch_count} payment-history mismatches."
+                    if issue_count else "No configured sample-data quality warnings were found."
+                )
+                checks.append({"id": "data-quality", "title": "Sample data quality", "status": quality_status, "detail": quality_detail})
+        except Exception as exc:
+            checks.append({"id": "sample-dataset", "title": "Bundled sample data", "status": "blocked", "detail": f"The CSV could not be analysed: {exc}"})
+
+    try:
+        storage.operations_summary(len(VALIDATION_TASK_IDS))
+        checks.append({
+            "id": "state-store", "title": "Workspace state store", "status": "passed",
+            "detail": "SQLite opened successfully and the workspace tables are available.",
+        })
+    except Exception:
+        checks.append({
+            "id": "state-store", "title": "Workspace state store", "status": "blocked",
+            "detail": "SQLite could not be opened. Check the database path and write permissions.",
+        })
+
+    checks.extend([
+        {
+            "id": "model-validation", "title": "Model and fairness validation", "status": "review",
+            "detail": "No predictive model, holdout evaluation, calibration results or subgroup fairness results are implemented in this demo.",
+        },
+        {
+            "id": "privacy-controls", "title": "Access and privacy controls", "status": "review",
+            "detail": "This public demo has no authentication or role-based access control. Use sample data only.",
+        },
+        {
+            "id": "human-oversight", "title": "Human oversight boundary", "status": "passed",
+            "detail": "The demo has no customer-contact, account-change or automated adverse-action integration.",
+        },
+    ])
+
+    counts = {status: sum(check["status"] == status for check in checks) for status in ("passed", "review", "blocked")}
+    overall = "blocked" if counts["blocked"] else "review_required" if counts["review"] else "demo_checks_passed"
+    return {
+        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "overall_status": overall,
+        "overall_label": "Fix required" if overall == "blocked" else "Human review required" if overall == "review_required" else "Demo checks passed",
+        "summary": {"passed": counts["passed"], "review": counts["review"], "blocked": counts["blocked"], "total": len(checks)},
+        "checks": checks,
+        "scope_note": "This scan checks the running demo and its bundled sample. It does not certify regulatory compliance, model validity or approval for real customer decisions.",
+    }
 
 
 @app.put("/api/validation-checklist/{task_id}")
