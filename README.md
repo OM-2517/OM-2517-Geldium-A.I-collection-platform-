@@ -10,9 +10,9 @@ A React + FastAPI decision-support prototype built to demonstrate the four deliv
 - CSV upload and re-analysis through the FastAPI endpoint (10 MB / 10,000-row demonstration limits).
 - Customer explorer with search, outcome filtering, record detail drawer and CSV export.
 - Explainable risk simulator with adjustable inputs, visible rule triggers, support recommendations and an explicit human-oversight statement.
-- Mock human-review queue. “Mark reviewed” is saved locally in the browser on the current device; it does not perform a financial action or persist to a database.
+- Human-review queue with backend-saved review status and a recent activity trail in SQLite; it does not perform a financial action.
 - Four-stage workflow view: data intake → assessment → support routing → learning and monitoring.
-- Interactive pre-deployment checklist covering data readiness, model evaluation, fairness, privacy and pilot controls. Progress is stored only in the browser on the current device.
+- Interactive pre-deployment checklist covering data readiness, model evaluation, fairness, privacy and pilot controls. Progress is stored by the backend in SQLite.
 - Responsible AI page covering fairness, explainability, privacy, compliance review and observed dataset-quality issues.
 - Performance scorecard covering business and customer KPIs for a future controlled pilot.
 - Responsive layout for desktop and tablet/mobile demonstrations.
@@ -95,14 +95,14 @@ Open `http://localhost:10000`.
 
 ## Deploy online with Render
 
-The project is prepared for a single Render Docker Web Service, so the React UI and FastAPI endpoints share one public URL.
+The project is prepared for a single Render Docker Web Service, so the React UI and FastAPI endpoints share one public URL. Review status and checklist progress use a small SQLite state store (`GELDIUM_DB_PATH` can point it elsewhere). This is demo persistence only: Render's free filesystem is ephemeral, so state can be cleared by a restart or redeploy. Use an external managed database and authentication before storing operational or customer data.
 
 1. Create a GitHub repository and upload the **contents** of this folder. Keep `Dockerfile` and `render.yaml` at the repository root.
 2. In Render, choose **New → Blueprint** and connect that GitHub repository.
 3. Review the service details from `render.yaml`, then create the Blueprint. Render builds the Docker image and deploys the app as one service.
 4. Open the Render URL after deployment. The dashboard and API share that URL; `/api/health` should return `status: ok`.
 
-Uploading files to GitHub stores the project but does not publish a live website by itself. Connect the repository to Render as described above. The included Blueprint config requests Render's free plan; free services may spin down after inactivity. The demo does not use a database or persistent disk; uploaded data is processed for the response and is not saved as a user dataset.
+Uploading files to GitHub stores the project but does not publish a live website by itself. Connect the repository to Render as described above. The included Blueprint config requests Render's free plan; free services may spin down after inactivity. Uploaded data is processed for the response and is not saved as a user dataset.
 
 ## API smoke test
 
@@ -118,6 +118,13 @@ python -m backend.smoke_test
 - `GET /api/sample` — analyse and return the included sample dataset.
 - `POST /api/analyze` — upload and analyse a CSV file. Required columns: `Customer_ID` and `Delinquent_Account`.
 - `POST /api/simulate` — return an explainable illustrative rule-based routing result for the entered scenario.
+- `GET /api/reviews` — saved queue states and the latest 12 review activity events.
+- `PUT /api/reviews/{customer_id}` — save a review state and add an activity event (`{"reviewed": true}`).
+- `DELETE /api/reviews` — clear demo review states and their activity history.
+- `GET /api/validation-checklist` — backend-saved completion for the supported checklist tasks.
+- `PUT /api/validation-checklist/{task_id}` — save a checklist state (`{"completed": true}`).
+- `DELETE /api/validation-checklist` — clear checklist progress.
+- `GET /api/operations/summary` — backend counters for reviewed customers, checklist progress and review activity.
 
 Interactive API documentation is available at `/docs` when the API is running.
 
@@ -126,7 +133,7 @@ Interactive API documentation is available at `/docs` when the API is running.
 1. Start on **Overview** and explain the supplied dataset baseline and the major quality warnings.
 2. Open **Customer explorer**, search a customer ID and inspect its source fields and six monthly payment labels.
 3. Open **Risk simulator**, adjust the inputs and run the assessment. Explain each visible trigger and point out that it is a demonstration rule, not a trained model.
-4. Open **Human review queue** and mark a case reviewed. Explain that sensitive cases require human attention; the status is only a local UI demonstration.
+4. Open **Human review queue**, mark a case reviewed, and inspect the server-saved recent activity trail. Explain that sensitive cases require human attention; the status is only a demo record.
 5. Open **AI workflow** and describe the four-stage model: input, decision, action and learning.
 6. Open **Responsible AI** and discuss fairness tests, explainability, data privacy, compliance review and why validation is still pending.
 7. Finish on **Performance** and explain how business KPIs and customer outcomes would be evaluated in a controlled pilot.
@@ -139,12 +146,12 @@ Interactive API documentation is available at `/docs` when the API is running.
 | CSV upload, validation and descriptive summary | Implemented |
 | Customer table, filters and detail view | Implemented |
 | Explainable illustrative rules simulator | Implemented; thresholds are demo assumptions |
-| Mock human-review queue | Implemented in browser state only |
+| Human-review queue statuses and recent activity | Implemented with SQLite demo persistence; not an audit-grade or authenticated workflow |
 | Workflow and governance views | Implemented as strategy visualization |
 | Trained Logistic Regression / Decision Tree | Not implemented; Task 2 is a conceptual plan |
 | Model validation, calibration and subgroup fairness results | Not available; required before a real pilot |
 | Real SMS/email, CRM or payment integrations | Not implemented |
-| Authentication, database persistence and production audit service | Not implemented |
+| Authentication, managed database and production audit service | Not implemented |
 
 ## Responsible use and security notes
 
@@ -157,9 +164,20 @@ Interactive API documentation is available at `/docs` when the API is running.
 ## Project structure
 
 ```text
-Geldium AI Collections Intelligence Platform/
-├── backend/       # FastAPI service and bundled sample CSV
-├── frontend/      # React/Vite app
+Geldium_AI_Collections_Platform/
+├── backend/
+│   ├── data/delinquency_sample.csv
+│   ├── main.py
+│   ├── storage.py
+│   └── requirements.txt
+├── frontend/
+│   ├── src/App.jsx
+│   ├── src/main.jsx
+│   ├── src/styles.css
+│   ├── package.json
+│   └── vite.config.js
+├── docs/
+├── reference_deliverables/   # Task 1–4 reports, slides and source data
 ├── Dockerfile
 ├── render.yaml
 └── README.md

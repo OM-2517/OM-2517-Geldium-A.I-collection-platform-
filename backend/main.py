@@ -12,6 +12,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+try:
+    from . import storage
+except ImportError:  # Supports `uvicorn main:app --app-dir backend` for local use.
+    import storage
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_PATH = BASE_DIR / "data" / "delinquency_sample.csv"
 STATIC_DIR = BASE_DIR / "static"
@@ -27,13 +32,14 @@ app = FastAPI(
     description="A responsible decision-support prototype for exploratory collections analytics.",
     version="1.0.0",
 )
+_KNOWN_CUSTOMER_IDS: set[str] | None = None
 
 allowed_origins = os.getenv("CORS_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in allowed_origins],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -44,6 +50,20 @@ class RiskRequest(BaseModel):
     dti_pct: float = Field(ge=0, le=200)
     credit_score: int = Field(ge=300, le=900)
     recent_missed_months: int = Field(ge=0, le=6)
+
+
+class ReviewUpdate(BaseModel):
+    reviewed: bool
+
+
+class ValidationUpdate(BaseModel):
+    completed: bool
+
+
+VALIDATION_TASK_IDS = [
+    "data-definitions", "reconcile-payments", "missingness", "utilization", "labels", "identity",
+    "baseline", "holdout", "calibration", "fairness", "explainability", "privacy", "pilot", "monitoring",
+]
 
 
 def _safe_number(value: Any) -> float | None:
@@ -271,7 +291,8 @@ def simulate_risk(payload: RiskRequest) -> dict[str, Any]:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "Geldium Collections Intelligence", "mode": "demo"}
+    storage.operations_summary(len(VALIDATION_TASK_IDS))
+    return {"status": "ok", "service": "Geldium Collections Intelligence", "mode": "demo", "state_store": "sqlite"}
 
 
 @app.get("/api/sample")
@@ -306,6 +327,57 @@ async def analyze_upload(file: UploadFile = File(...)) -> dict[str, Any]:
 @app.post("/api/simulate")
 def risk_simulation(payload: RiskRequest) -> dict[str, Any]:
     return simulate_risk(payload)
+
+
+@app.get("/api/reviews")
+def get_review_state() -> dict[str, Any]:
+    """Return saved review flags and a short activity history for the demo queue."""
+    return storage.list_reviews()
+
+
+@app.put("/api/reviews/{customer_id}")
+def update_review_state(customer_id: str, payload: ReviewUpdate) -> dict[str, Any]:
+    global _KNOWN_CUSTOMER_IDS
+    customer_id = customer_id.strip()
+    if not customer_id or len(customer_id) > 120:
+        raise HTTPException(status_code=400, detail="Customer ID must contain 1 to 120 characters.")
+    if _KNOWN_CUSTOMER_IDS is None:
+        if not DATA_PATH.exists():
+            raise HTTPException(status_code=503, detail="The demo customer dataset is not available.")
+        _KNOWN_CUSTOMER_IDS = set(pd.read_csv(DATA_PATH, usecols=["Customer_ID"])["Customer_ID"].dropna().astype(str))
+    if customer_id not in _KNOWN_CUSTOMER_IDS:
+        raise HTTPException(status_code=404, detail="Customer was not found in the demo dataset.")
+    return storage.set_review(customer_id, payload.reviewed)
+
+
+@app.delete("/api/reviews")
+def reset_review_state() -> dict[str, str]:
+    storage.clear_reviews()
+    return {"status": "ok", "message": "Demo review statuses reset."}
+
+
+@app.get("/api/validation-checklist")
+def get_validation_state() -> dict[str, Any]:
+    return storage.list_validation(VALIDATION_TASK_IDS)
+
+
+@app.get("/api/operations/summary")
+def operations_summary() -> dict[str, Any]:
+    """Return service-backed workflow counters for the demo workspace."""
+    return storage.operations_summary(len(VALIDATION_TASK_IDS))
+
+
+@app.put("/api/validation-checklist/{task_id}")
+def update_validation_state(task_id: str, payload: ValidationUpdate) -> dict[str, Any]:
+    if task_id not in VALIDATION_TASK_IDS:
+        raise HTTPException(status_code=404, detail="Validation task was not found.")
+    return storage.set_validation(task_id, payload.completed)
+
+
+@app.delete("/api/validation-checklist")
+def reset_validation_state() -> dict[str, str]:
+    storage.clear_validation()
+    return {"status": "ok", "message": "Demo validation progress reset."}
 
 
 if STATIC_DIR.exists():
