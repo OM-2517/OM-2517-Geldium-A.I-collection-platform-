@@ -157,19 +157,9 @@ Interactive API documentation is available at `/docs` when the API is running.
 ## Project structure
 
 ```text
-Geldium_AI_Collections_Platform/
-├── backend/
-│   ├── data/delinquency_sample.csv
-│   ├── main.py
-│   └── requirements.txt
-├── frontend/
-│   ├── src/App.jsx
-│   ├── src/main.jsx
-│   ├── src/styles.css
-│   ├── package.json
-│   └── vite.config.js
-├── docs/
-├── reference_deliverables/   # Task 1–4 reports, slides and source data
+Geldium AI Collections Intelligence Platform/
+├── backend/       # FastAPI service and bundled sample CSV
+├── frontend/      # React/Vite app
 ├── Dockerfile
 ├── render.yaml
 └── README.md
